@@ -24,7 +24,7 @@
 //!     &[2., 2.],
 //!     &[3., 3.],
 //!     &[4., 4.],
-//!     &[5., 5.]]);
+//!     &[5., 5.]]).unwrap();
 //! let y = vec![1., 2., 3., 4., 5.]; //your target values
 //!
 //! let knn = KNNRegressor::fit(&x, &y, Default::default()).unwrap();
@@ -207,7 +207,7 @@ impl<TX: Number, TY: Number, X: Array2<TX>, Y: Array1<TY>, D: Distance<Vec<TX>>>
 {
     /// Fits KNN regressor to a NxM matrix where N is number of samples and M is number of features.
     /// * `x` - training data
-    /// * `y` - vector with real values    
+    /// * `y` - vector with real values
     /// * `parameters` - additional parameters like search algorithm and k
     pub fn fit(
         x: &X,
@@ -295,9 +295,10 @@ mod tests {
     #[test]
     fn knn_fit_predict_weighted() {
         let x =
-            DenseMatrix::from_2d_array(&[&[1., 2.], &[3., 4.], &[5., 6.], &[7., 8.], &[9., 10.]]);
+            DenseMatrix::from_2d_array(&[&[1., 2.], &[3., 4.], &[5., 6.], &[7., 8.], &[9., 10.]])
+                .unwrap();
         let y: Vec<f64> = vec![1., 2., 3., 4., 5.];
-        let y_exp = vec![1., 2., 3., 4., 5.];
+        let y_exp = [1., 2., 3., 4., 5.];
         let knn = KNNRegressor::fit(
             &x,
             &y,
@@ -322,9 +323,10 @@ mod tests {
     #[test]
     fn knn_fit_predict_uniform() {
         let x =
-            DenseMatrix::from_2d_array(&[&[1., 2.], &[3., 4.], &[5., 6.], &[7., 8.], &[9., 10.]]);
+            DenseMatrix::from_2d_array(&[&[1., 2.], &[3., 4.], &[5., 6.], &[7., 8.], &[9., 10.]])
+                .unwrap();
         let y: Vec<f64> = vec![1., 2., 3., 4., 5.];
-        let y_exp = vec![2., 2., 3., 4., 4.];
+        let y_exp = [2., 2., 3., 4., 4.];
         let knn = KNNRegressor::fit(&x, &y, Default::default()).unwrap();
         let y_hat = knn.predict(&x).unwrap();
         assert_eq!(5, Vec::len(&y_hat));
@@ -341,7 +343,8 @@ mod tests {
     #[cfg(feature = "serde")]
     fn serde() {
         let x =
-            DenseMatrix::from_2d_array(&[&[1., 2.], &[3., 4.], &[5., 6.], &[7., 8.], &[9., 10.]]);
+            DenseMatrix::from_2d_array(&[&[1., 2.], &[3., 4.], &[5., 6.], &[7., 8.], &[9., 10.]])
+                .unwrap();
         let y = vec![1., 2., 3., 4., 5.];
 
         let knn = KNNRegressor::fit(&x, &y, Default::default()).unwrap();
