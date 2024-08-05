@@ -67,6 +67,7 @@
 use std::collections::LinkedList;
 use std::default::Default;
 use std::fmt::Debug;
+use std::iter;
 use std::marker::PhantomData;
 
 use rand::seq::SliceRandom;
@@ -112,6 +113,7 @@ pub struct DecisionTreeClassifier<
     Y: Array1<TY>,
 > {
     nodes: Vec<Node>,
+    node_samples_per_class: Vec<usize>,
     parameters: Option<DecisionTreeClassifierParameters>,
     num_classes: usize,
     classes: Vec<TY>,
@@ -133,8 +135,8 @@ impl<TX: Number + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
     fn parameters(&self) -> &DecisionTreeClassifierParameters {
         self.parameters.as_ref().unwrap()
     }
-    /// get classes vector, return a shared reference
-    fn classes(&self) -> &Vec<TY> {
+    /// Get classes vector, return a shared reference
+    pub fn classes(&self) -> &Vec<TY> {
         self.classes.as_ref()
     }
     /// Get depth of tree
@@ -508,6 +510,7 @@ impl<TX: Number + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
     fn new() -> Self {
         Self {
             nodes: vec![],
+            node_samples_per_class: vec![],
             parameters: Option::None,
             num_classes: 0usize,
             classes: vec![],
@@ -595,6 +598,7 @@ impl<TX: Number + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
 
         let mut tree = DecisionTreeClassifier {
             nodes: change_nodes,
+            node_samples_per_class: count,
             parameters: Some(parameters),
             num_classes: k,
             classes,
@@ -637,7 +641,57 @@ impl<TX: Number + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
         Ok(result)
     }
 
+    /// Predict class probabilities for `x`.
+    /// * `x` - _KxM_ data where _K_ is number of observations and _M_ is number
+    ///   of features.
+    ///
+    /// The predicted class probability for an observation is the proportion of
+    /// training samples in the predicted leaf node that belong to that class.
+    ///
+    /// Returns a _KxC_ array of predicted class probabilities, where _C_ is the
+    /// number of classes and the order of classes corresponds to that returned
+    /// by the `classes` method.
+    pub fn predict_proba<R: Array2<f64>>(&self, x: &X) -> Result<R, Failed> {
+        let (n, _) = x.shape();
+        let mut result = R::zeros(n, self.num_classes);
+
+        for i in 0..n {
+            let row_probs = self.predict_proba_for_row(x, i);
+
+            for (j, prob) in row_probs.enumerate() {
+                result.set((i, j), prob);
+            }
+        }
+
+        Ok(result)
+    }
+
     pub(crate) fn predict_for_row(&self, x: &X, row: usize) -> usize {
+        self.nodes()[self.predict_node_id_for_row(x, row)].output
+    }
+
+    pub(crate) fn predict_proba_for_row(
+        &self,
+        x: &X,
+        row: usize,
+    ) -> impl Iterator<Item = f64> + '_ {
+        let node_id = self.predict_node_id_for_row(x, row);
+        let offset = node_id * self.num_classes;
+        let node_samples_per_class =
+            &self.node_samples_per_class[offset..offset + self.num_classes];
+
+        let n_node_samples: usize = node_samples_per_class.iter().sum();
+
+        // Avoid division by zero in case the node has no samples (the returned
+        // probabilities will all be zero in this case)
+        let inverse_n_node_samples = (n_node_samples.max(1) as f64).recip();
+
+        node_samples_per_class
+            .iter()
+            .map(move |&n_samples| n_samples as f64 * inverse_n_node_samples)
+    }
+
+    fn predict_node_id_for_row(&self, x: &X, row: usize) -> usize {
         let mut result = 0;
         let mut queue: LinkedList<usize> = LinkedList::new();
 
@@ -648,7 +702,7 @@ impl<TX: Number + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
                 Some(node_id) => {
                     let node = &self.nodes()[node_id];
                     if node.true_child.is_none() && node.false_child.is_none() {
-                        result = node.output;
+                        result = node_id;
                     } else if x.get((row, node.split_feature)).to_f64().unwrap()
                         <= node.split_value.unwrap_or(std::f64::NAN)
                     {
@@ -824,6 +878,23 @@ impl<TX: Number + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
             return false;
         }
 
+        let node_samples_per_class_offset = self.node_samples_per_class.len();
+
+        self.node_samples_per_class.reserve(2 * self.num_classes);
+        self.node_samples_per_class
+            .extend(iter::repeat(0).take(2 * self.num_classes));
+
+        let node_samples_per_class =
+            &mut self.node_samples_per_class[node_samples_per_class_offset..];
+
+        for (i, &true_sample) in true_samples.iter().enumerate() {
+            if true_sample > 0 {
+                node_samples_per_class[visitor.y[i]] += true_sample;
+            } else {
+                node_samples_per_class[self.num_classes + visitor.y[i]] += visitor.samples[i];
+            }
+        }
+
         let true_child_idx = self.nodes().len();
 
         self.nodes.push(Node::new(visitor.true_child_output, tc));
@@ -894,7 +965,7 @@ impl<TX: Number + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::basic::matrix::DenseMatrix;
+    use crate::linalg::basic::{arrays::Array, matrix::DenseMatrix};
 
     #[test]
     fn search_parameters() {
@@ -1078,6 +1149,70 @@ mod tests {
         assert_eq!(
             tree.compute_feature_importances(true),
             vec![0., 0., 0.4444444444444444, 0.5555555555555556]
+        );
+    }
+
+    #[cfg_attr(
+        all(target_arch = "wasm32", not(target_os = "wasi")),
+        wasm_bindgen_test::wasm_bindgen_test
+    )]
+    #[test]
+    fn test_predict_proba() {
+        let x: DenseMatrix<f64> = DenseMatrix::from_2d_array(&[
+            &[1., 1., 1., 0.],
+            &[1., 1., 1., 0.],
+            &[1., 1., 1., 1.],
+            &[1., 1., 0., 0.],
+            &[1., 1., 0., 1.],
+            &[1., 0., 1., 0.],
+            &[1., 0., 1., 0.],
+            &[1., 0., 1., 1.],
+            &[1., 0., 0., 0.],
+            &[1., 0., 0., 1.],
+            &[0., 1., 1., 0.],
+            &[0., 1., 1., 0.],
+            &[0., 1., 1., 1.],
+            &[0., 1., 0., 0.],
+            &[0., 1., 0., 1.],
+            &[0., 0., 1., 0.],
+            &[0., 0., 1., 0.],
+            &[0., 0., 1., 1.],
+            &[0., 0., 0., 0.],
+            &[0., 0., 0., 1.],
+        ])
+        .unwrap();
+        let y: Vec<u32> = vec![1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0];
+
+        let classifier = DecisionTreeClassifier::fit(
+            &x,
+            &y,
+            DecisionTreeClassifierParameters {
+                criterion: SplitCriterion::Gini,
+                max_depth: None,
+                min_samples_leaf: 1,
+                min_samples_split: 2,
+                seed: None,
+            },
+        )
+        .unwrap();
+        let results: DenseMatrix<_> = classifier.predict_proba(&x).unwrap();
+
+        // Check against results from sklearn (note that sklearn uses a
+        // different splitting policy, so our results may not agree for inputs
+        // where the splitting is less straightforward)
+        assert_eq!(
+            results,
+            DenseMatrix::<f64>::new(
+                x.shape().0,
+                classifier.classes().len(),
+                vec![
+                    0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+                    0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0,
+                    0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0
+                ],
+                true
+            )
+            .unwrap()
         );
     }
 
