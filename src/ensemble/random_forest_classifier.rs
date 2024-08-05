@@ -155,6 +155,15 @@ impl RandomForestClassifierParameters {
 }
 
 impl<TX: Number + FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
+    RandomForestClassifier<TX, TY, X, Y>
+{
+    /// Get classes vector, return a shared reference
+    pub fn classes(&self) -> &Vec<TY> {
+        self.classes.as_ref().unwrap()
+    }
+}
+
+impl<TX: Number + FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
     PartialEq for RandomForestClassifier<TX, TY, X, Y>
 {
     fn eq(&self, other: &Self) -> bool {
@@ -580,6 +589,31 @@ impl<TX: FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY
         which_max(&result)
     }
 
+    /// Predict class probabilities for `x`.
+    /// * `x` - _KxM_ data where _K_ is number of observations and _M_ is number
+    ///   of features.
+    ///
+    /// The predicted class probability for an observation is the average of the
+    /// predicted class probabilities from all the trees in the forest. The
+    /// predicted class probability from a single tree is the proportion of
+    /// training samples in the predicted leaf node that belong to that class.
+    ///
+    /// Returns a _KxC_ array of predicted class probabilities, where _C_ is the
+    /// number of classes and the order of classes corresponds to that returned
+    /// by the `classes` method.
+    pub fn predict_proba<R: Array2<f64>>(&self, x: &X) -> Result<R, Failed> {
+        let (n, _) = x.shape();
+        let mut result = R::zeros(n, self.classes.as_ref().unwrap().len());
+
+        for tree in self.trees.as_ref().unwrap().iter() {
+            result.add_mut(&tree.predict_proba::<R>(x)?);
+        }
+
+        result.div_scalar_mut(self.trees.as_ref().unwrap().len() as f64);
+
+        Ok(result)
+    }
+
     fn sample_with_replacement(y: &[usize], num_classes: usize, rng: &mut impl Rng) -> Vec<usize> {
         let class_weight = vec![1.; num_classes];
         let nrows = y.len();
@@ -607,6 +641,7 @@ impl<TX: FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::basic::arrays::Array;
     use crate::linalg::basic::matrix::DenseMatrix;
     use crate::metrics::*;
 
@@ -758,6 +793,70 @@ mod tests {
             accuracy(&y, &classifier.predict_oob(&x).unwrap())
                 < accuracy(&y, &classifier.predict(&x).unwrap())
         );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[test]
+    fn fit_predict_proba() {
+        let x: DenseMatrix<f64> = DenseMatrix::from_2d_array(&[
+            &[1., 1., 1., 0.],
+            &[1., 1., 1., 0.],
+            &[1., 1., 1., 1.],
+            &[1., 1., 0., 0.],
+            &[1., 1., 0., 1.],
+            &[1., 0., 1., 0.],
+            &[1., 0., 1., 0.],
+            &[1., 0., 1., 1.],
+            &[1., 0., 0., 0.],
+            &[1., 0., 0., 1.],
+            &[0., 1., 1., 0.],
+            &[0., 1., 1., 0.],
+            &[0., 1., 1., 1.],
+            &[0., 1., 0., 0.],
+            &[0., 1., 0., 1.],
+            &[0., 0., 1., 0.],
+            &[0., 0., 1., 0.],
+            &[0., 0., 1., 1.],
+            &[0., 0., 0., 0.],
+            &[0., 0., 0., 1.],
+        ])
+        .unwrap();
+        let y: Vec<u32> = vec![1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0];
+
+        let classifier = RandomForestClassifier::fit(
+            &x,
+            &y,
+            RandomForestClassifierParameters {
+                criterion: SplitCriterion::Gini,
+                max_depth: None,
+                min_samples_leaf: 1,
+                min_samples_split: 2,
+                n_trees: 100, // this is n_estimators in sklearn
+                m: Option::None,
+                keep_samples: false,
+                seed: 0,
+            },
+        )
+        .unwrap();
+
+        let results: DenseMatrix<_> = classifier.predict_proba(&x).unwrap();
+
+        // Check against average results from sklearn
+        assert!(results.approximate_eq(
+            &DenseMatrix::<f64>::new(
+                x.shape().0,
+                classifier.classes().len(),
+                vec![
+                    0.03, 0.03, 0.92, 0.92, 1.00, 0.03, 0.03, 0.92, 0.92, 1.00, 0.03, 0.03, 0.92,
+                    0.92, 1.00, 0.03, 0.03, 0.92, 0.92, 1.00, 0.97, 0.97, 0.08, 0.08, 0.00, 0.97,
+                    0.97, 0.08, 0.08, 0.00, 0.97, 0.97, 0.08, 0.08, 0.00, 0.97, 0.97, 0.08, 0.08,
+                    0.00,
+                ],
+                true
+            )
+            .unwrap(),
+            0.15
+        ));
     }
 
     #[cfg_attr(
